@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
 <style>
   :root {
     --bg: #1C1F22;
@@ -204,7 +205,7 @@
   .chip.ecc { border-color: var(--good); color: var(--good); }
   .chip.unknown { border-color: var(--warn); color: var(--warn); }
   .notes-line { font-size: 12.5px; color: var(--dim); line-height: 1.5; margin-bottom: 10px; }
-  table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
+  table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13px; }
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   th, td {
     text-align: left;
@@ -265,10 +266,14 @@
 
     <div class="row scan-row">
       <button id="cam-btn">Scan with camera</button>
-      <button id="photo-btn">Scan from photo</button>
+      <button id="photo-btn">Scan barcode photo</button>
+      <button id="ocr-btn">Read printed text (photo)</button>
       <input type="file" id="photo-file" accept="image/*" style="display:none;">
+      <input type="file" id="ocr-file" accept="image/*" style="display:none;">
     </div>
     <p class="scan-note" id="scan-support-note"></p>
+    <p class="scan-note">If a stick has more than one barcode (e.g. an OEM part-number code plus a manufacturer spec code), scan both before hitting "Add to log" - each scan adds a new line instead of replacing the last one, so both get decoded together as one entry.</p>
+    <p class="scan-note">Barcodes on these labels are usually a serial/lot code, not the spec line. "Read printed text" instead photographs the label and OCRs the actual printed part-number and "4GBxRxN PCx-xxxxx" text - often more useful than the barcode for this data. Review what it reads before adding, since OCR can misread characters.</p>
 
     <div class="preview" id="preview" style="display:none;">
       <div class="preview-title">Parsed from current text</div>
@@ -319,6 +324,8 @@
   const camBtn = document.getElementById('cam-btn');
   const photoBtn = document.getElementById('photo-btn');
   const photoFile = document.getElementById('photo-file');
+  const ocrBtn = document.getElementById('ocr-btn');
+  const ocrFile = document.getElementById('ocr-file');
   const scannerContainer = document.getElementById('scanner-container');
   const scanNote = document.getElementById('scan-support-note');
 
@@ -413,8 +420,26 @@
     if (!result.capacity) notes.push('Capacity not found in text - add it manually if known.');
     if (!result.rank) notes.push('Rank/width (e.g. 1Rx8) not found in text.');
 
+    // If nothing at all decoded and the text is a short single token, this is very likely a
+    // serial/lot/date code from a barcode - not the printed part-number/spec line. Barcodes on
+    // RAM labels are usually wired to the serial (for the maker's own tracking), not the human-
+    // readable spec text above them, so scanning often grabs the wrong string entirely.
+    if (!jedec && !result.mfg && !result.capacity && !result.rank && /^[A-Z0-9]{6,14}$/.test(upper.replace(/\s+/g, ''))) {
+      notes.unshift('This looks like a serial/lot code, not the part-number/spec line - the barcode may encode the serial rather than the printed spec text above it. Try typing the full printed part number and "4GBxRxN PCx-xxxxx" line manually instead.');
+    }
+
     result.notes = notes.join(' ');
     return result;
+  }
+
+  function appendScanResult(code) {
+    const existing = rawInput.value.trim();
+    // Avoid appending an exact duplicate if the same code gets detected twice in a row.
+    if (existing.split('\n').map(l => l.trim()).includes(code.trim())) {
+      rawInput.value = existing;
+      return;
+    }
+    rawInput.value = existing ? existing + '\n' + code : code;
   }
 
   function renderPreview() {
@@ -441,8 +466,8 @@
       tableHolder.innerHTML = '<div class="empty">No sticks logged yet. Paste a label above and hit "Add to log".</div>';
       return;
     }
-    const cols = ['generation','capacity','rank','width','speed','voltage','bufferEcc','mfg','formFactor'];
-    const heads = ['Gen','Cap','Rank','Width','Speed','Voltage','Buffer/ECC','Mfg','Form','Notes',''];
+    const cols = ['raw','generation','capacity','rank','width','speed','voltage','bufferEcc','mfg','formFactor'];
+    const heads = ['Scanned/Typed','Gen','Cap','Rank','Width','Speed','Voltage','Buffer/ECC','Mfg','Form','Notes',''];
     let html = '<table><thead><tr>' + heads.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
     entries.forEach((e, i) => {
       html += '<tr>';
@@ -643,7 +668,7 @@
       scanGuide.classList.add('locked');
       scanStatus.textContent = 'Got it: ' + code;
       setTimeout(() => {
-        rawInput.value = code;
+        appendScanResult(code);
         renderPreview();
         stopCamera();
       }, 350);
@@ -670,7 +695,7 @@
           scanGuide.classList.add('locked');
           scanStatus.textContent = 'Got it: ' + qr.data;
           setTimeout(() => {
-            rawInput.value = qr.data;
+            appendScanResult(qr.data);
             renderPreview();
             stopCamera();
           }, 350);
@@ -703,7 +728,7 @@
         const qr = (typeof jsQR === 'function') ? jsQR(imgData.data, c.width, c.height) : null;
         URL.revokeObjectURL(url);
         if (qr && qr.data) {
-          rawInput.value = qr.data;
+          appendScanResult(qr.data);
           renderPreview();
         } else {
           scanNote.textContent = 'No barcode or QR found in that photo - try a closer, sharper, well-lit, level shot, or paste the printed number manually.';
@@ -721,13 +746,50 @@
     }, (result) => {
       if (result && result.codeResult && result.codeResult.code) {
         URL.revokeObjectURL(url);
-        rawInput.value = result.codeResult.code;
+        appendScanResult(result.codeResult.code);
         renderPreview();
       } else {
         tryQrOnFile();
       }
     });
     photoFile.value = '';
+  });
+
+  // OCR on a photo of the printed label text - the actual decodable spec line (part number,
+  // capacity, JEDEC speed code) is human-readable print, not encoded in most RAM barcodes.
+  ocrBtn.addEventListener('click', () => {
+    if (typeof Tesseract === 'undefined') {
+      scanNote.textContent = 'OCR library failed to load (check your connection) - paste labels manually above instead.';
+      return;
+    }
+    ocrFile.click();
+  });
+
+  ocrFile.addEventListener('change', () => {
+    const file = ocrFile.files[0];
+    if (!file) return;
+    scanNote.textContent = 'Reading text from photo… (a few seconds)';
+    ocrBtn.disabled = true;
+    const url = URL.createObjectURL(file);
+    Tesseract.recognize(url, 'eng', {
+      logger: () => {}
+    }).then(({ data }) => {
+      URL.revokeObjectURL(url);
+      ocrBtn.disabled = false;
+      const text = (data && data.text || '').trim();
+      if (text) {
+        appendScanResult(text);
+        renderPreview();
+        scanNote.textContent = 'Read text from photo - check it over before adding, OCR can misread characters.';
+      } else {
+        scanNote.textContent = 'Could not read any text from that photo - try a closer, sharper, well-lit, level shot.';
+      }
+    }).catch(() => {
+      URL.revokeObjectURL(url);
+      ocrBtn.disabled = false;
+      scanNote.textContent = 'OCR failed on that photo - try again or paste the text manually.';
+    });
+    ocrFile.value = '';
   });
 
   checkQuagga();
