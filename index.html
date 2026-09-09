@@ -99,6 +99,89 @@
     line-height: 1.5;
   }
   #scanner-container video, #scanner-container canvas { width: 100%; display: block; }
+  .scan-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: #000;
+  }
+  .scanner-container {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+  .scanner-container video, .scanner-container canvas {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 100%; min-height: 100%;
+    width: auto; height: auto;
+    object-fit: cover;
+  }
+  .scan-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    pointer-events: none;
+  }
+  .scan-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 16px 0;
+    pointer-events: auto;
+  }
+  .scan-hint {
+    color: #fff;
+    font-size: 13.5px;
+    background: rgba(0,0,0,0.5);
+    padding: 6px 12px;
+    border-radius: 20px;
+  }
+  .scan-close {
+    background: rgba(0,0,0,0.5);
+    border: none;
+    color: #fff;
+    font-size: 22px;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .scan-guide {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80%;
+    max-width: 480px;
+    height: 26%;
+    max-height: 160px;
+  }
+  .scan-guide .corner {
+    position: absolute;
+    width: 28px; height: 28px;
+    border: 3px solid var(--copper);
+    transition: border-color 0.15s;
+  }
+  .scan-guide.locked .corner { border-color: var(--good); }
+  .scan-guide .tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+  .scan-guide .tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+  .scan-guide .bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+  .scan-guide .br { bottom: 0; right: 0; border-left: none; border-top: none; }
+  .scan-bottom {
+    display: flex;
+    justify-content: center;
+    padding-bottom: 28px;
+  }
+  .scan-status {
+    color: #fff;
+    font-size: 13px;
+    background: rgba(0,0,0,0.5);
+    padding: 6px 14px;
+    border-radius: 20px;
+  }
   .preview {
     margin-top: 14px;
     border-top: 1px dashed var(--line);
@@ -181,8 +264,6 @@
       <input type="file" id="photo-file" accept="image/*" style="display:none;">
     </div>
     <p class="scan-note" id="scan-support-note"></p>
-    <p class="scan-note">Tips: hold ~20-30cm back so the camera can focus, use even bright light with no glare, fill most of the frame with the barcode, keep it level. If the label uses a small square 2D code (Data Matrix) rather than a striped barcode, scanning won't read it - type the printed part number in manually instead.</p>
-    <div id="scanner-container" style="display:none; max-width:420px; margin-top:10px; border:1px solid var(--line); border-radius:4px; overflow:hidden; position:relative;"></div>
 
     <div class="preview" id="preview" style="display:none;">
       <div class="preview-title">Parsed from current text</div>
@@ -200,6 +281,23 @@
       </div>
     </div>
     <div id="table-holder"></div>
+  </div>
+</div>
+
+<div id="scan-modal" class="scan-modal" style="display:none;">
+  <div id="scanner-container" class="scanner-container"></div>
+  <div class="scan-overlay">
+    <div class="scan-topbar">
+      <span class="scan-hint">Align the barcode inside the box</span>
+      <button id="scan-close-btn" class="scan-close">&times;</button>
+    </div>
+    <div id="scan-guide" class="scan-guide">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+    </div>
+    <div class="scan-bottom">
+      <span id="scan-status" class="scan-status">Looking for a barcode…</span>
+    </div>
   </div>
 </div>
 
@@ -421,9 +519,17 @@
     URL.revokeObjectURL(url);
   });
 
-  // Live inline camera scanning via QuaggaJS, with iOS Safari compatibility fixes
+  // Live camera scanning via QuaggaJS, full-screen modal with a targeting box (like a real
+  // scanner app), decode restricted to that box, iOS Safari compatibility fixes included.
+  const scanModal = document.getElementById('scan-modal');
+  const scanGuide = document.getElementById('scan-guide');
+  const scanStatus = document.getElementById('scan-status');
+  const scanCloseBtn = document.getElementById('scan-close-btn');
+
   let quaggaReady = false;
   let scanning = false;
+  let lastDetectAt = 0;
+  let candidateStreak = 0;
 
   function checkQuagga() {
     if (typeof Quagga === 'undefined') {
@@ -440,11 +546,14 @@
   function stopCamera() {
     if (scanning) {
       try { Quagga.stop(); } catch (e) {}
+      try { Quagga.offProcessed(); } catch (e) {}
+      try { Quagga.offDetected(); } catch (e) {}
     }
     scanning = false;
-    scannerContainer.style.display = 'none';
+    scanModal.style.display = 'none';
     scannerContainer.innerHTML = '';
-    camBtn.textContent = 'Scan with camera';
+    scanGuide.classList.remove('locked');
+    candidateStreak = 0;
   }
 
   function startCameraWithConstraints(constraints, isRetry) {
@@ -452,9 +561,10 @@
       inputStream: {
         type: 'LiveStream',
         target: scannerContainer,
-        constraints: constraints
+        constraints: constraints,
+        area: { top: '37%', bottom: '37%', left: '10%', right: '10%' }
       },
-      locator: { patchSize: 'medium', halfSample: true },
+      locator: { patchSize: 'x-small', halfSample: false },
       numOfWorkers: 2,
       frequency: 10,
       decoder: { readers: QUAGGA_READERS },
@@ -466,8 +576,8 @@
           startCameraWithConstraints({ facingMode: 'environment' }, true);
           return;
         }
-        scanNote.textContent = 'Could not access camera - check browser permissions, or paste manually.';
-        scannerContainer.style.display = 'none';
+        scanStatus.textContent = 'Could not access camera - check permissions.';
+        setTimeout(stopCamera, 1500);
         return;
       }
       // iOS Safari requires these on the video element or it forces fullscreen / won't play inline.
@@ -480,30 +590,51 @@
       }
       Quagga.start();
       scanning = true;
-      camBtn.textContent = 'Stop scanning';
+      scanStatus.textContent = 'Looking for a barcode…';
+
+      // Live feedback: Quagga fires onProcessed for every frame, even ones with no confirmed
+      // decode yet - use that to show "candidate found, holding steady" before a full lock.
+      Quagga.onProcessed((result) => {
+        if (!scanning) return;
+        const found = result && result.boxes && result.boxes.length > 0;
+        if (found) {
+          candidateStreak++;
+          scanStatus.textContent = 'Candidate found - hold steady…';
+        } else if (Date.now() - lastDetectAt > 400) {
+          candidateStreak = 0;
+          scanStatus.textContent = 'Looking for a barcode…';
+        }
+      });
+
       startQrLoop();
     });
   }
 
   camBtn.addEventListener('click', () => {
     if (!quaggaReady && !checkQuagga()) return;
-    if (scanning) { stopCamera(); return; }
-
-    scannerContainer.style.display = 'block';
+    scanModal.style.display = 'block';
     scannerContainer.innerHTML = '';
+    scanGuide.classList.remove('locked');
+    scanStatus.textContent = 'Starting camera…';
 
     Quagga.offDetected();
     Quagga.onDetected((result) => {
       const code = result && result.codeResult && result.codeResult.code;
-      if (code) {
+      if (!code) return;
+      lastDetectAt = Date.now();
+      scanGuide.classList.add('locked');
+      scanStatus.textContent = 'Got it: ' + code;
+      setTimeout(() => {
         rawInput.value = code;
         renderPreview();
         stopCamera();
-      }
+      }, 350);
     });
 
     startCameraWithConstraints({ facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, false);
   });
+
+  scanCloseBtn.addEventListener('click', stopCamera);
 
   // jsQR fallback pass on the live feed, in case the label uses a QR code rather than a 1D barcode
   function startQrLoop() {
@@ -518,9 +649,13 @@
         const imgData = ctx.getImageData(0, 0, c.width, c.height);
         const qr = jsQR(imgData.data, c.width, c.height);
         if (qr && qr.data) {
-          rawInput.value = qr.data;
-          renderPreview();
-          stopCamera();
+          scanGuide.classList.add('locked');
+          scanStatus.textContent = 'Got it: ' + qr.data;
+          setTimeout(() => {
+            rawInput.value = qr.data;
+            renderPreview();
+            stopCamera();
+          }, 350);
           return;
         }
       }
