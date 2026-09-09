@@ -827,6 +827,7 @@
   // capacity, JEDEC speed code) is human-readable print, not encoded in most RAM barcodes.
   const ocrModal = document.getElementById('ocr-modal');
   const ocrScannerContainer = document.getElementById('ocr-scanner-container');
+  const ocrGuide = document.getElementById('ocr-guide');
   const ocrCloseBtn = document.getElementById('ocr-close-btn');
   const ocrCaptureBtn = document.getElementById('ocr-capture-btn');
   const ocrLiveStatus = document.getElementById('ocr-live-status');
@@ -949,10 +950,11 @@
     // The live preview is shown with CSS object-fit:cover, which crops/zooms the raw video
     // to fill the phone screen's aspect ratio. Capturing the full raw frame instead would grab
     // a completely different (wider, uncropped) view than what was on screen - replicate the
-    // same cover-crop here so the captured photo matches exactly what was visible when you hit
-    // capture.
-    const containerW = ocrScannerContainer.clientWidth;
-    const containerH = ocrScannerContainer.clientHeight;
+    // same cover-crop here so the *full-frame* source coordinates match what's visible behind
+    // the guide box when you hit capture.
+    const containerRect = ocrScannerContainer.getBoundingClientRect();
+    const containerW = containerRect.width;
+    const containerH = containerRect.height;
     const videoAspect = video.videoWidth / video.videoHeight;
     const containerAspect = containerW / containerH;
     let sx, sy, sw, sh;
@@ -968,10 +970,23 @@
       sy = (video.videoHeight - sh) / 2;
     }
 
+    // The guide box is what you actually framed the label into - not the whole screen. Map its
+    // on-screen rectangle into the same source-pixel space using the cover scale factor above,
+    // so the captured photo is cropped to what you saw inside the guide, not the full wide frame.
+    let cropSx = sx, cropSy = sy, cropSw = sw, cropSh = sh;
+    if (ocrGuide) {
+      const guideRect = ocrGuide.getBoundingClientRect();
+      const scale = sw / containerW; // cover preserves aspect, so sh/containerH gives the same value
+      cropSx = sx + (guideRect.left - containerRect.left) * scale;
+      cropSy = sy + (guideRect.top - containerRect.top) * scale;
+      cropSw = guideRect.width * scale;
+      cropSh = guideRect.height * scale;
+    }
+
     const c = document.createElement('canvas');
-    c.width = Math.round(sw);
-    c.height = Math.round(sh);
-    c.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    c.width = Math.round(cropSw);
+    c.height = Math.round(cropSh);
+    c.getContext('2d').drawImage(video, cropSx, cropSy, cropSw, cropSh, 0, 0, c.width, c.height);
     stopOcrCamera();
     openCropModal(c, c.width, c.height);
   });
